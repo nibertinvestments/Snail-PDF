@@ -1,24 +1,49 @@
 # Snail PDF
-A clean browser-based PDF reader and editor that lets you open any PDF, read pages, add notes, highlight content, draw on pages, and export a modified PDF.
+
+Snail PDF is a browser-based PDF editor and reader built with React, Vite, PDF.js, and PDF-lib. It lets you open a PDF, review pages, add notes, highlight content, draw markup, undo changes, print the result, and save a clean edited PDF.
 
 ## Features
-- Open and read any PDF file in the browser
-- Navigate pages with previous/next controls
-- Zoom in and out for better readability
-- Add text notes at any page position
-- Highlight regions on the page
-- Draw freehand marks directly on the PDF preview
-- Export the updated PDF as a new file
+
+- Open and render a PDF directly in the browser
+- Navigate through multiple pages
+- Zoom in and out for cleaner reading
+- Add text annotations on any page
+- Highlight sections of a page
+- Draw freehand markup directly on the PDF preview
+- Undo and redo edits in a working history
+- Delete selected markup if needed
+- Print the edited result
+- Save the updated document as a new PDF file
+
+## Live project
+
+Repository: https://github.com/nibertinvestments/Snail-PDF
 
 ## Run locally
+
 1. Install dependencies:
+   ```bash
    npm install
-2. Start the dev server:
+   ```
+2. Start the development server:
+   ```bash
    npm run dev
-3. Open the local URL shown in the terminal, typically http://localhost:3000
+   ```
+3. Open the local URL shown in the terminal (typically http://localhost:3000)
 
 ## Production build
+
+```bash
 npm run build
+```
+
+## Tech stack
+
+- React
+- Vite
+- PDF.js
+- PDF-lib
 
 ## Notes
-This app is built with React + Vite and uses PDF.js for page rendering and PDF-lib for exporting modified files.
+
+This project is designed to behave like a lightweight PDF editing tool in the browser, with robust rendering and export support for edited files. The app stores editing actions in an undo/redo history so changes can be reviewed and reversed before saving or printing.
