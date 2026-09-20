@@ -1,0 +1,535 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { PDFDocument, rgb } from 'pdf-lib';
+import * as pdfjsLib from 'pdfjs-dist';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.min.mjs',
+  import.meta.url,
+).toString();
+
+const TOOL_OPTIONS = [
+  { id: 'select', label: 'View' },
+  { id: 'text', label: 'Text' },
+  { id: 'highlight', label: 'Highlight' },
+  { id: 'draw', label: 'Draw' },
+];
+
+const defaultColors = {
+  highlight: '#facc15',
+  text: '#2f6fed',
+  draw: '#111827',
+};
+
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+const buildId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+function hexToRgb(hex) {
+  const normalized = hex.replace('#', '');
+  const fullHex = normalized.length === 3 ? normalized.split('').map((char) => char + char).join('') : normalized;
+  const parsed = Number.parseInt(fullHex, 16);
+  return {
+    r: ((parsed >> 16) & 255) / 255,
+    g: ((parsed >> 8) & 255) / 255,
+    b: (parsed & 255) / 255,
+  };
+}
+
+function formatFileName(fileName) {
+  if (!fileName) {
+    return 'edited-document';
+  }
+
+  return fileName.replace(/\.pdf$/i, '') || 'edited-document';
+}
+
+function getSvgPath(points) {
+  if (!points || points.length === 0) {
+    return '';
+  }
+
+  return points
+    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x * 100} ${point.y * 100}`)
+    .join(' ');
+}
+
+export default function App() {
+  const fileInputRef = useRef(null);
+  const pageContainerRef = useRef(null);
+  const canvasRef = useRef(null);
+
+  const [pdfBytes, setPdfBytes] = useState(null);
+  const [pdfDocument, setPdfDocument] = useState(null);
+  const [pageCount, setPageCount] = useState(0);
+  const [pageNumber, setPageNumber] = useState(1);
+  const [scale, setScale] = useState(1.2);
+  const [tool, setTool] = useState('select');
+  const [noteText, setNoteText] = useState('New note');
+  const [annotations, setAnnotations] = useState([]);
+  const [draftAnnotation, setDraftAnnotation] = useState(null);
+  const [error, setError] = useState('');
+  const [fileName, setFileName] = useState('');
+
+  const currentPageAnnotations = useMemo(
+    () => annotations.filter((item) => item.page === pageNumber),
+    [annotations, pageNumber],
+  );
+
+  useEffect(() => {
+    if (!pdfDocument) {
+      return undefined;
+    }
+
+    let canceled = false;
+
+    const renderPage = async () => {
+      const page = await pdfDocument.getPage(pageNumber);
+      const viewport = page.getViewport({ scale });
+      const canvas = canvasRef.current;
+
+      if (!canvas) {
+        return;
+      }
+
+      const context = canvas.getContext('2d');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      await page.render({ canvasContext: context, viewport }).promise;
+
+      if (!canceled) {
+        setError('');
+      }
+    };
+
+    renderPage().catch((loadError) => {
+      if (!canceled) {
+        setError(loadError?.message || 'Unable to render the selected PDF page.');
+      }
+    });
+
+    return () => {
+      canceled = true;
+    };
+  }, [pdfDocument, pageNumber, scale]);
+
+  const openPdf = async (file) => {
+    if (!file) {
+      return;
+    }
+
+    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+      setError('Please upload a valid PDF file.');
+      return;
+    }
+
+    const fileBytes = await file.arrayBuffer();
+    const pdfDoc = await pdfjsLib.getDocument({ data: fileBytes }).promise;
+
+    setPdfBytes(fileBytes);
+    setPdfDocument(pdfDoc);
+    setPageCount(pdfDoc.numPages);
+    setPageNumber(1);
+    setAnnotations([]);
+    setDraftAnnotation(null);
+    setError('');
+    setFileName(file.name);
+  };
+
+  const handleFileSelection = (event) => {
+    const selected = event.target.files?.[0];
+    openPdf(selected);
+    event.target.value = '';
+  };
+
+  const handlePointerPosition = (event) => {
+    const bounds = pageContainerRef.current?.getBoundingClientRect();
+    if (!bounds) {
+      return null;
+    }
+
+    const x = clamp((event.clientX - bounds.left) / bounds.width, 0, 1);
+    const y = clamp((event.clientY - bounds.top) / bounds.height, 0, 1);
+    return { x, y };
+  };
+
+  const startDraftAnnotation = (event, type) => {
+    const point = handlePointerPosition(event);
+    if (!point) {
+      return;
+    }
+
+    if (type === 'text') {
+      const nextAnnotation = {
+        id: buildId(),
+        page: pageNumber,
+        type: 'text',
+        x: point.x,
+        y: point.y,
+        w: 0.28,
+        h: 0.13,
+        text: noteText.trim() || 'New note',
+        color: defaultColors.text,
+      };
+
+      setAnnotations((current) => [...current, nextAnnotation]);
+      return;
+    }
+
+    if (type === 'highlight') {
+      setDraftAnnotation({
+        id: 'draft-highlight',
+        page: pageNumber,
+        type: 'highlight',
+        startX: point.x,
+        startY: point.y,
+        x: point.x,
+        y: point.y,
+        w: 0,
+        h: 0,
+        color: defaultColors.highlight,
+      });
+      return;
+    }
+
+    if (type === 'draw') {
+      setDraftAnnotation({
+        id: 'draft-draw',
+        page: pageNumber,
+        type: 'draw',
+        color: defaultColors.draw,
+        points: [point],
+      });
+    }
+  };
+
+  const applyDraftUpdate = (event) => {
+    const point = handlePointerPosition(event);
+    if (!point || !draftAnnotation) {
+      return;
+    }
+
+    if (draftAnnotation.type === 'highlight') {
+      const nextX = Math.min(draftAnnotation.startX, point.x);
+      const nextY = Math.min(draftAnnotation.startY, point.y);
+      const nextWidth = Math.abs(point.x - draftAnnotation.startX);
+      const nextHeight = Math.abs(point.y - draftAnnotation.startY);
+
+      setDraftAnnotation((current) => ({
+        ...current,
+        x: nextX,
+        y: nextY,
+        w: nextWidth,
+        h: nextHeight,
+      }));
+      return;
+    }
+
+    if (draftAnnotation.type === 'draw') {
+      setDraftAnnotation((current) => ({
+        ...current,
+        points: [...(current.points || []), point],
+      }));
+    }
+  };
+
+  const finalizeDraft = () => {
+    if (!draftAnnotation) {
+      return;
+    }
+
+    if (draftAnnotation.type === 'highlight') {
+      const width = Math.abs(draftAnnotation.w);
+      const height = Math.abs(draftAnnotation.h);
+
+      if (width > 0.01 && height > 0.01) {
+        const nextAnnotation = {
+          id: buildId(),
+          page: draftAnnotation.page,
+          type: 'highlight',
+          x: draftAnnotation.x,
+          y: draftAnnotation.y,
+          w: width,
+          h: height,
+          color: draftAnnotation.color,
+        };
+
+        setAnnotations((current) => [...current, nextAnnotation]);
+      }
+    }
+
+    if (draftAnnotation.type === 'draw') {
+      const points = draftAnnotation.points || [];
+      if (points.length > 1) {
+        setAnnotations((current) => [
+          ...current,
+          {
+            id: buildId(),
+            page: draftAnnotation.page,
+            type: 'draw',
+            points,
+            color: draftAnnotation.color,
+          },
+        ]);
+      }
+    }
+
+    setDraftAnnotation(null);
+  };
+
+  const exportPdf = async () => {
+    if (!pdfBytes) {
+      setError('Please upload a PDF before exporting.');
+      return;
+    }
+
+    try {
+      const pdfDoc = await PDFDocument.load(pdfBytes);
+      const annotationMap = new Map();
+
+      for (const item of annotations) {
+        const list = annotationMap.get(item.page) || [];
+        list.push(item);
+        annotationMap.set(item.page, list);
+      }
+
+      for (const [pageIndex, items] of annotationMap.entries()) {
+        const pdfPage = pdfDoc.getPage(pageIndex - 1);
+        const { width, height } = pdfPage.getSize();
+
+        for (const item of items) {
+          if (item.type === 'text') {
+            const x = item.x * width;
+            const y = height - item.y * height - (item.h || 0.13) * height;
+            pdfPage.drawText(item.text, {
+              x,
+              y,
+              size: 20,
+              color: rgb(...Object.values(hexToRgb(item.color))),
+            });
+          }
+
+          if (item.type === 'highlight') {
+            const x = item.x * width;
+            const y = height - item.y * height - item.h * height;
+            pdfPage.drawRectangle({
+              x,
+              y,
+              width: item.w * width,
+              height: item.h * height,
+              color: rgb(...Object.values(hexToRgb(item.color))),
+              opacity: 0.35,
+            });
+          }
+
+          if (item.type === 'draw') {
+            const points = item.points || [];
+            const lineColor = hexToRgb(item.color);
+            for (let index = 1; index < points.length; index += 1) {
+              const previous = points[index - 1];
+              const current = points[index];
+              pdfPage.drawLine({
+                start: { x: previous.x * width, y: height - previous.y * height },
+                end: { x: current.x * width, y: height - current.y * height },
+                color: rgb(lineColor.r, lineColor.g, lineColor.b),
+                thickness: 2,
+              });
+            }
+          }
+        }
+      }
+
+      const modifiedBytes = await pdfDoc.save();
+      const url = URL.createObjectURL(new Blob([modifiedBytes], { type: 'application/pdf' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${formatFileName(fileName)}-edited.pdf`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (saveError) {
+      setError(saveError?.message || 'Unable to export the updated PDF.');
+    }
+  };
+
+  const canNavigatePrevious = pageNumber > 1;
+  const canNavigateNext = pageNumber < pageCount;
+
+  return (
+    <div className="app-shell">
+      <header className="topbar">
+        <div>
+          <p className="eyebrow">Snail PDF</p>
+          <h1>PDF reader and editor</h1>
+        </div>
+
+        <div className="actions-group">
+          <button className="secondary" onClick={() => fileInputRef.current?.click()}>
+            Open PDF
+          </button>
+          <input ref={fileInputRef} type="file" accept="application/pdf" onChange={handleFileSelection} hidden />
+          <button className="primary" onClick={exportPdf} disabled={!pdfBytes}>
+            Download edited PDF
+          </button>
+        </div>
+      </header>
+
+      <div className="workspace">
+        <aside className="sidebar">
+          <div className="panel-card">
+            <h2>Tools</h2>
+            <div className="tool-grid">
+              {TOOL_OPTIONS.map((item) => (
+                <button
+                  key={item.id}
+                  className={item.id === tool ? 'tool-button active' : 'tool-button'}
+                  onClick={() => setTool(item.id)}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="panel-card">
+            <h2>Page controls</h2>
+            <div className="zoom-row">
+              <button onClick={() => setScale((value) => Number((value - 0.1).toFixed(2)))}>-</button>
+              <span>{scale.toFixed(2)}x</span>
+              <button onClick={() => setScale((value) => Number((value + 0.1).toFixed(2)))}>+</button>
+            </div>
+
+            <div className="page-nav">
+              <button onClick={() => setPageNumber((value) => Math.max(1, value - 1))} disabled={!canNavigatePrevious}>
+                Prev
+              </button>
+              <span>
+                {pageNumber}/{pageCount || 0}
+              </span>
+              <button onClick={() => setPageNumber((value) => Math.min(pageCount || 1, value + 1))} disabled={!canNavigateNext}>
+                Next
+              </button>
+            </div>
+          </div>
+
+          <div className="panel-card">
+            <h2>Note</h2>
+            <textarea
+              value={noteText}
+              onChange={(event) => setNoteText(event.target.value)}
+              rows={4}
+              placeholder="Add a note"
+            />
+          </div>
+        </aside>
+
+        <main className="viewer-shell">
+          {error ? <div className="status-banner error">{error}</div> : null}
+
+          {!pdfDocument ? (
+            <div className="empty-state">
+              <div className="empty-card">
+                <h2>No PDF loaded</h2>
+                <p>Choose a PDF file to begin reading and editing.</p>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <div className="page-toolbar">
+                <span>Page {pageNumber}</span>
+                <span>{annotations.length} mark(s)</span>
+              </div>
+
+              <div
+                ref={pageContainerRef}
+                className="page-container"
+                onPointerDown={(event) => {
+                  if (tool === 'select') {
+                    return;
+                  }
+
+                  if (tool === 'text') {
+                    startDraftAnnotation(event, 'text');
+                    return;
+                  }
+
+                  startDraftAnnotation(event, tool);
+                }}
+                onPointerMove={(event) => {
+                  if (draftAnnotation) {
+                    applyDraftUpdate(event);
+                  }
+                }}
+                onPointerUp={finalizeDraft}
+                onPointerLeave={finalizeDraft}
+              >
+                <canvas ref={canvasRef} className="page-canvas" />
+
+                <div className="annotation-layer">
+                  {[...currentPageAnnotations, draftAnnotation].filter(Boolean).map((item) => {
+                    if (item.page !== pageNumber) {
+                      return null;
+                    }
+
+                    if (item.type === 'text') {
+                      return (
+                        <div
+                          key={item.id}
+                          className="annotation text-annotation"
+                          style={{
+                            left: `${item.x * 100}%`,
+                            top: `${item.y * 100}%`,
+                            width: `${(item.w || 0.28) * 100}%`,
+                            height: `${(item.h || 0.13) * 100}%`,
+                          }}
+                        >
+                          {item.text}
+                        </div>
+                      );
+                    }
+
+                    if (item.type === 'highlight') {
+                      return (
+                        <div
+                          key={item.id}
+                          className="annotation highlight-annotation"
+                          style={{
+                            left: `${item.x * 100}%`,
+                            top: `${item.y * 100}%`,
+                            width: `${(item.w || 0.1) * 100}%`,
+                            height: `${(item.h || 0.1) * 100}%`,
+                            backgroundColor: item.color || defaultColors.highlight,
+                          }}
+                        />
+                      );
+                    }
+
+                    if (item.type === 'draw') {
+                      return (
+                        <svg
+                          key={item.id}
+                          className="annotation draw-annotation"
+                          viewBox="0 0 100 100"
+                          preserveAspectRatio="none"
+                        >
+                          <path
+                            d={getSvgPath(item.points || [])}
+                            fill="none"
+                            stroke={item.color || defaultColors.draw}
+                            strokeWidth="2.2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      );
+                    }
+
+                    return null;
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+    </div>
+  );
+}
